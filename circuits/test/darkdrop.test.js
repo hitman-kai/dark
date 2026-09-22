@@ -1,14 +1,14 @@
-// DarkDrop V4 — Circuit Test Suite
+// Credit Note Claim Circuit — Test Suite
 //
 // Tests the full DarkDrop claim circuit:
 //   1-4. Valid claims (happy paths, incl. minimum amount)
 //   5-7. Invalid: wrong nullifier / amount commitment / merkle root
-//   8.   Invalid: inconsistent recipient_hi/lo (issue #20 F6 injective binding)
+//   8.   Invalid: inconsistent recipient_hi/lo (injective recipient binding)
 //   9.   Invalid: zero amount
 //   10.  Recipient binding: tampered public recipient rejected
-//   11.  Valid: recipient pubkey > field modulus (overflow handling)
+//   11.  Valid: recipient address > field modulus (overflow handling)
 //
-// Issue #20: the password public input was removed (vacuous in-circuit gate),
+// The password public input was removed (vacuous in-circuit gate),
 // and the recipient is now bound injectively via Poseidon(recipient_hi, recipient_lo).
 
 const { buildPoseidon } = require("circomlibjs");
@@ -19,7 +19,7 @@ const fs = require("fs");
 const DEPTH = 20;
 const BUILD_DIR = path.join(__dirname, "../build");
 const WASM_PATH = path.join(BUILD_DIR, "darkdrop_js/darkdrop.wasm");
-// issue #20: point at the regenerated V2 (4-input) artifacts.
+// V2 (4 public input) artifacts, produced by the local build in CONTRIBUTING.md.
 const ZKEY_PATH = path.join(BUILD_DIR, "darkdrop_v2_final.zkey");
 const VK_PATH = path.join(BUILD_DIR, "verification_key_v2.json");
 
@@ -33,13 +33,13 @@ function poseidonHash(inputs) {
   return F.toObject(poseidon(inputs));
 }
 
-// Convert a pubkey (any BigInt) to a valid BN254 field element via Poseidon.
-// Mirrors on-chain logic: split 32-byte pubkey into two 128-bit halves, hash them.
-// This prevents ~13% of pubkeys (those > BN254 field modulus) from causing mismatches.
-function pubkeyToField(pubkeyBigInt) {
+// Convert a recipient address (any BigInt) to a valid BN254 field element via Poseidon.
+// Mirrors the verifier: split the 32-byte address into two 128-bit halves, hash them.
+// This prevents ~13% of addresses (those > BN254 field modulus) from causing mismatches.
+function addressToField(addressBigInt) {
   const mask128 = (BigInt(1) << BigInt(128)) - BigInt(1);
-  const lo = pubkeyBigInt & mask128;
-  const hi = (pubkeyBigInt >> BigInt(128)) & mask128;
+  const lo = addressBigInt & mask128;
+  const hi = (addressBigInt >> BigInt(128)) & mask128;
   return poseidonHash([hi, lo]);
 }
 
@@ -109,14 +109,14 @@ function createDrop(amountVal) {
 }
 
 // Build full circuit input for a claim.
-// recipient is a raw pubkey BigInt — split into hi/lo 128-bit halves (private)
+// recipient is a raw address BigInt — split into hi/lo 128-bit halves (private)
 // and hashed via Poseidon for the public `recipient` signal, matching the
-// on-chain pubkey_to_field. The circuit constrains recipient === Poseidon(hi, lo).
+// verifier-side address_to_field. The circuit constrains recipient === Poseidon(hi, lo).
 function buildClaimInput(drop, merkleRoot, pathElements, pathIndices, recipient) {
   const mask128 = (BigInt(1) << BigInt(128)) - BigInt(1);
   const recipientLo = recipient & mask128;
   const recipientHi = (recipient >> BigInt(128)) & mask128;
-  const recipientField = pubkeyToField(recipient);
+  const recipientField = addressToField(recipient);
   return {
     // Private
     secret: drop.secret.toString(),
@@ -173,10 +173,10 @@ async function runTests() {
 
   // --- Create several drops and build a tree ---
   console.log("\nCreating test drops...");
-  const drop1 = createDrop(500000000);               // 0.5 SOL, no password
-  const drop2 = createDrop(1000000000);               // 1 SOL, no password
-  const drop3 = createDrop(100000);                   // 0.0001 SOL
-  const drop4 = createDrop(1);                         // minimum: 1 lamport
+  const drop1 = createDrop(500000000);               // 0.5 units, no password
+  const drop2 = createDrop(1000000000);               // 1 unit, no password
+  const drop3 = createDrop(100000);                   // 0.0001 units
+  const drop4 = createDrop(1);                         // minimum: 1 base unit
 
   const leaves = [drop1.leaf, drop2.leaf, drop3.leaf, drop4.leaf];
   console.log(`Building Merkle tree (depth ${DEPTH}, ${leaves.length} leaves)...`);
@@ -187,7 +187,7 @@ async function runTests() {
   let failed = 0;
 
   // ---- TEST 1: Valid claim, no password ----
-  console.log("\n[TEST 1] Valid claim — 0.5 SOL, no password");
+  console.log("\n[TEST 1] Valid claim — 0.5 units, no password");
   {
     const { pathElements, pathIndices } = getMerkleProof(layers, 0);
     const input = buildClaimInput(drop1, root, pathElements, pathIndices, recipient);
@@ -197,7 +197,7 @@ async function runTests() {
   }
 
   // ---- TEST 2: Valid claim, different drop ----
-  console.log("\n[TEST 2] Valid claim — 1 SOL, no password");
+  console.log("\n[TEST 2] Valid claim — 1 unit, no password");
   {
     const { pathElements, pathIndices } = getMerkleProof(layers, 1);
     const input = buildClaimInput(drop2, root, pathElements, pathIndices, recipient);
@@ -207,7 +207,7 @@ async function runTests() {
   }
 
   // ---- TEST 3: Valid claim — drop at index 2 ----
-  console.log("\n[TEST 3] Valid claim — 0.0001 SOL (index 2)");
+  console.log("\n[TEST 3] Valid claim — 0.0001 units (index 2)");
   {
     const { pathElements, pathIndices } = getMerkleProof(layers, 2);
     const input = buildClaimInput(drop3, root, pathElements, pathIndices, recipient);
@@ -216,13 +216,13 @@ async function runTests() {
     else { console.log("  FAIL: Proof did not verify"); failed++; }
   }
 
-  // ---- TEST 4: Minimum amount (1 lamport) ----
-  console.log("\n[TEST 4] Valid claim — minimum amount (1 lamport)");
+  // ---- TEST 4: Minimum amount (1 base unit) ----
+  console.log("\n[TEST 4] Valid claim — minimum amount (1 base unit)");
   {
     const { pathElements, pathIndices } = getMerkleProof(layers, 3);
     const input = buildClaimInput(drop4, root, pathElements, pathIndices, recipient);
     const { valid } = await generateAndVerify(input);
-    if (valid) { console.log("  PASS: Proof verified for 1 lamport"); passed++; }
+    if (valid) { console.log("  PASS: Proof verified for 1 base unit"); passed++; }
     else { console.log("  FAIL: Minimum amount proof failed"); failed++; }
   }
 
@@ -256,7 +256,7 @@ async function runTests() {
     if (ok) passed++; else failed++;
   }
 
-  // ---- TEST 8: Inconsistent recipient_hi/lo (issue #20 F6 binding, should fail) ----
+  // ---- TEST 8: Inconsistent recipient_hi/lo (injective binding, should fail) ----
   console.log("\n[TEST 8] Invalid — recipient_hi/lo do not hash to public recipient");
   {
     const { pathElements, pathIndices } = getMerkleProof(layers, 0);
@@ -297,17 +297,17 @@ async function runTests() {
     else { console.log("  FAIL: Tampered recipient was accepted"); failed++; }
   }
 
-  // ---- TEST 11: Recipient pubkey exceeding BN254 field modulus ----
-  console.log("\n[TEST 11] Valid claim — recipient pubkey > field modulus (overflow case)");
+  // ---- TEST 11: Recipient address exceeding BN254 field modulus ----
+  console.log("\n[TEST 11] Valid claim — recipient address > field modulus (overflow case)");
   {
-    // This pubkey exceeds the BN254 scalar field modulus (~2^254).
+    // This address exceeds the BN254 scalar field modulus (~2^254).
     // Without the Poseidon hash fix, this would cause a proof/verification mismatch.
-    const overflowPubkey = BigInt("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
+    const overflowAddress = BigInt("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
     const { pathElements, pathIndices } = getMerkleProof(layers, 0);
-    const input = buildClaimInput(drop1, root, pathElements, pathIndices, overflowPubkey);
+    const input = buildClaimInput(drop1, root, pathElements, pathIndices, overflowAddress);
     const { valid } = await generateAndVerify(input);
-    if (valid) { console.log("  PASS: Overflow pubkey handled correctly via Poseidon hash"); passed++; }
-    else { console.log("  FAIL: Overflow pubkey proof failed"); failed++; }
+    if (valid) { console.log("  PASS: Overflow address handled correctly via Poseidon hash"); passed++; }
+    else { console.log("  FAIL: Overflow address proof failed"); failed++; }
   }
 
   // ---- Summary ----

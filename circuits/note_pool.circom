@@ -8,13 +8,13 @@ include "./lib/merkle_tree.circom";
 // Note Pool Claim Circuit — Second-Layer Merkle Mixer for Credit Notes
 //
 // This circuit enables "recursive privacy": a credit note deposited into the
-// note pool can be redeemed as a FRESH credit note with no on-chain linkage
+// note pool can be redeemed as a FRESH credit note with no public linkage
 // to the original. The first ZK proof (claim_credit) hides which deposit
 // was claimed. This second ZK proof hides which credit note is being redeemed.
 //
 // Pool leaf: Poseidon(pool_secret, pool_nullifier, amount, pool_blinding_factor)
 //   - pool_secret and pool_nullifier are fresh secrets (not reused from L1)
-//   - amount is the VERIFIED amount from the credit note (program-constructed leaf)
+//   - amount is the VERIFIED amount from the credit note (verifier-constructed leaf)
 //   - pool_blinding_factor is a fresh random scalar
 //
 // The circuit proves:
@@ -37,8 +37,8 @@ template NotePoolClaim(merkle_depth) {
     signal input pool_indices[merkle_depth];       // Merkle proof direction bits
     signal input new_blinding;                    // fresh blinding for new credit note
     signal input new_salt;                        // fresh salt for re-randomization
-    signal input recipient_hi;                    // recipient pubkey high 128 bits
-    signal input recipient_lo;                    // recipient pubkey low 128 bits
+    signal input recipient_hi;                    // recipient address high 128 bits
+    signal input recipient_lo;                    // recipient address low 128 bits
 
     // === PUBLIC INPUTS ===
     signal input pool_merkle_root;                // current root of the note pool tree
@@ -82,7 +82,7 @@ template NotePoolClaim(merkle_depth) {
     // === CONSTRAINT 5: New credit note commitment ===
     // Prove the new commitment encodes the SAME amount with fresh randomness.
     // new_stored_commitment = Poseidon(Poseidon(amount, new_blinding), new_salt)
-    // This matches the re-randomized commitment scheme used by CreditNote PDAs.
+    // This matches the re-randomized commitment scheme used by stored credit notes.
     component new_original = Poseidon(2);
     new_original.inputs[0] <== amount;
     new_original.inputs[1] <== new_blinding;
@@ -101,5 +101,5 @@ template NotePoolClaim(merkle_depth) {
     recipient_hash === recipient_hasher.out;
 }
 
-// Instantiate with depth 20 (same as main DarkDrop tree — supports ~1M pool entries)
+// Instantiate with depth 20 (same as the credit note tree — supports ~1M pool entries)
 component main {public [pool_merkle_root, pool_nullifier_hash, new_stored_commitment, recipient_hash]} = NotePoolClaim(20);

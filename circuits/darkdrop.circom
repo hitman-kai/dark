@@ -5,7 +5,7 @@ include "./node_modules/circomlib/circuits/bitify.circom";
 include "./node_modules/circomlib/circuits/comparators.circom";
 include "./lib/merkle_tree.circom";
 
-// DarkDrop V4 Claim Circuit
+// Credit Note Claim Circuit
 //
 // Proves that the claimer knows the secret preimage of a leaf in the Merkle tree
 // without revealing which leaf, and that the claimed amount matches the committed amount.
@@ -16,11 +16,10 @@ include "./lib/merkle_tree.circom";
 //   - Nullifier prevents double-claim without linking to leaf
 //   - Recipient bound to proof injectively via Poseidon(hi, lo) (prevents front-running)
 //
-// Password protection is NOT enforced in-circuit. Password-protected drops are
-// protected SOLELY by client-side claim-code encryption (PBKDF2 + AES-256-GCM,
-// see frontend/src/lib/claim-code.ts). The former in-circuit `password_hash`
-// gate (issue #20 / F5) was removed: it was committed neither into the leaf nor
-// on-chain, so any claimer holding the leaf preimage could set password_hash = 0
+// Password protection is NOT enforced in-circuit. Password-protected notes are
+// protected solely by client-side claim-code encryption (PBKDF2 + AES-256-GCM).
+// The former in-circuit `password_hash` gate was removed: it was committed neither
+// into the leaf nor to the verifier, so any claimer holding the leaf preimage could set password_hash = 0
 // to disable it — it provided no protection. Password secrecy lives entirely in
 // the encrypted claim code, never in the proof.
 //
@@ -28,17 +27,17 @@ include "./lib/merkle_tree.circom";
 
 template DarkDropClaim(merkle_depth) {
 
-    // === PRIVATE INPUTS (from claim code, never revealed on-chain) ===
+    // === PRIVATE INPUTS (from claim code, never revealed to the verifier) ===
     signal input secret;
     signal input amount;
     signal input blinding_factor;
     signal input nullifier;
     signal input merkle_path[merkle_depth];
     signal input merkle_indices[merkle_depth];
-    signal input recipient_hi;                    // recipient pubkey high 128 bits
-    signal input recipient_lo;                    // recipient pubkey low 128 bits
+    signal input recipient_hi;                    // recipient address high 128 bits
+    signal input recipient_lo;                    // recipient address low 128 bits
 
-    // === PUBLIC INPUTS (visible on-chain, verified by program) ===
+    // === PUBLIC INPUTS (visible to the verifier) ===
     signal input merkle_root;
     signal input nullifier_hash;
     signal input recipient;                       // recipient_hash = Poseidon(recipient_hi, recipient_lo)
@@ -84,7 +83,7 @@ template DarkDropClaim(merkle_depth) {
     component range = Num2Bits(64);
     range.in <== amount;
 
-    // Amount must be > 0 (at least 1 lamport)
+    // Amount must be > 0 (at least one base unit)
     component is_zero = IsZero();
     is_zero.in <== amount;
     is_zero.out === 0; // amount is NOT zero
@@ -95,13 +94,13 @@ template DarkDropClaim(merkle_depth) {
     // V3 note-pool binding (note_pool.circom) and replaces the earlier
     // `recipient * recipient`, which was non-injective: x^2 == (p - x)^2, so a proof
     // for r also satisfied p - r. Poseidon(hi, lo) is injective over the witness,
-    // removing the ± ambiguity (issue #20 / F6).
+    // removing the ± ambiguity (injective recipient binding).
     component recipient_hasher = Poseidon(2);
     recipient_hasher.inputs[0] <== recipient_hi;
     recipient_hasher.inputs[1] <== recipient_lo;
     recipient === recipient_hasher.out;
 }
 
-// Instantiate with depth 20 (supports ~1M drops)
+// Instantiate with depth 20 (supports ~1M notes)
 // V2: amount is now PRIVATE — not exposed to verifier. Still constrained by leaf hash, commitment, range check.
 component main {public [merkle_root, nullifier_hash, recipient, amount_commitment]} = DarkDropClaim(20);

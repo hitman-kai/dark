@@ -1,235 +1,76 @@
-# Contributing to DarkDrop V4
-
-Thank you for your interest in contributing to DarkDrop. This document covers how to get started, the development workflow, and contribution guidelines.
-
----
+# Contributing
 
 ## Prerequisites
 
-| Tool | Version | Notes |
-|------|---------|-------|
-| Rust | 1.87.0+ (stable) | |
-| Solana CLI | 1.18+ | Uses `cargo build-sbf` from the SBF toolchain |
-| Anchor CLI | 0.30.1 | `anchor build` is broken — see Build section |
-| Node.js | 20+ | For scripts, circuits, frontend |
-| Circom | 2.2.2 | Only needed for circuit changes |
-| snarkjs | 0.7+ | Only needed for circuit changes |
+- [circom](https://docs.circom.io/getting-started/installation/) v2.1 or later
+- Node.js 18 or later
+- [snarkjs](https://github.com/iden3/snarkjs) (installed as a test dependency)
 
----
-
-## Repository Structure
+## Repository structure
 
 ```
-program/          Solana program (Anchor/Rust) — 18 instructions, triple VK (V1/V2/V3)
-circuits/         Circom ZK circuits (V2 credit note + V3 note pool) + build artifacts
-scripts/          E2E tests, security tests, stress test, migration runbooks
-frontend/         Next.js web application (/drop/create, /drop/claim, /drop/manage)
-relayer/          Express.js gasless relay server
-audits/           4 security audit reports + fix tracker
+circuits/
+  darkdrop.circom          credit note claim circuit (amount private)
+  note_pool.circom         note pool claim circuit
+  lib/merkle_tree.circom   Poseidon Merkle membership verifier
+  test/darkdrop.test.js    proof generation + verification suite
+  build/                   local build output, gitignored
 ```
 
----
+## Building the circuits
 
-## Building the Program
-
-`anchor build` is currently broken due to toolchain issues. Use the `cargo build-sbf` workaround:
+Install the circomlib dependency, then compile each circuit into `circuits/build`:
 
 ```bash
-cd program
-cargo build-sbf
-cp target/sbpf-solana-solana/release/darkdrop.so target/deploy/darkdrop.so
+cd circuits
+npm install
+
+circom darkdrop.circom --r1cs --wasm --sym -o build
+circom note_pool.circom --r1cs --wasm --sym -o build/note_pool
 ```
 
-For localnet tests that exercise the revoke time-lock, build with the `short-revoke-timeout` feature so the 30-day wait becomes 5 seconds:
+## Local proving keys
+
+The test suite needs a proving key and a verification key. For development, generate a throwaway Groth16 setup from a small Powers of Tau file. This is **not** a trusted setup and must never be used for a production verifier.
 
 ```bash
-cargo build-sbf --features short-revoke-timeout
+cd circuits/build
+npx snarkjs powersoftau new bn128 14 pot14_0000.ptau
+npx snarkjs powersoftau contribute pot14_0000.ptau pot14_0001.ptau --name="dev" -e="dev"
+npx snarkjs powersoftau prepare phase2 pot14_0001.ptau pot14_final.ptau
+
+npx snarkjs groth16 setup darkdrop.r1cs pot14_final.ptau darkdrop_v2_0000.zkey
+npx snarkjs zkey contribute darkdrop_v2_0000.zkey darkdrop_v2_final.zkey --name="dev" -e="dev"
+npx snarkjs zkey export verificationkey darkdrop_v2_final.zkey verification_key_v2.json
 ```
 
----
+The test suite expects `build/darkdrop_js/darkdrop.wasm`, `build/darkdrop_v2_final.zkey`, and `build/verification_key_v2.json`. A production deployment will run its own multi-party ceremony for each circuit.
 
-## Running Tests
-
-All test scripts accept `RPC_URL` (defaults to devnet) and `PROGRAM_ID` (defaults to the deployed devnet address).
-
-### Core flow (devnet)
+## Running the tests
 
 ```bash
-# Legacy flow (V1 circuit)
-node scripts/e2e-test.js
-
-# Credit note flow (V2 circuit) — amount hidden at claim, decorrelated at withdraw
-node scripts/e2e-credit-test.js
-
-# Relayer gasless flow
-node scripts/relayer-test.js
+cd circuits/test
+npm install
+node darkdrop.test.js
 ```
 
-### Security tests (devnet)
+The suite generates and verifies real Groth16 proofs, so each case takes a few seconds. It covers valid claims at several amounts including the one-unit minimum, wrong nullifier, wrong commitment, wrong root, inconsistent recipient halves, zero amount, tampered recipient, and a recipient address above the BN254 field modulus.
 
-```bash
-# 6 legacy attack vectors (V1 circuit)
-node scripts/security-tests.js
+## Changing a circuit
 
-# 7 credit note attack vectors (V2 circuit)
-node scripts/security-credit-tests.js
+Any change to a circuit's constraints or public inputs changes its verification key. When you change a circuit:
 
-# 4 note pool attack vectors (V3 circuit)
-node scripts/note-pool-security-tests.js
-```
+1. Recompile and regenerate the local keys as above.
+2. Run the test suite.
+3. Update ARCHITECTURE.md if the public input set, the leaf format, or a commitment format changed.
+4. Call out the change in your pull request description. Verifier implementations key off the public input order.
 
-### Revoke and close_receipt (localnet with short-timeout build)
+## Code style
 
-```bash
-# E2E: deposit → wait 5s → revoke → refund
-node scripts/revoke-test.js
-
-# 11 attack vectors (6 revoke + 5 close_receipt)
-node scripts/security-revoke-tests.js
-
-# E2E: deposit → claim normally → close receipt → rent refunded
-node scripts/close-receipt-test.js
-
-# Cross-implementation parity (JS amountToFieldBE ↔ circuit ↔ program u64_to_field_be)
-node scripts/revoke-crossimpl-test.js
-
-# Backward compat: 5-account create_drop still works, produces no receipt
-node scripts/legacy-create-drop-test.js
-```
-
-### Note Pool (recursive privacy)
-
-```bash
-# E2E: credit note → deposit to pool → claim fresh note → withdraw
-node scripts/note-pool-test.js
-
-# E2E: create_drop_to_pool (one-TX deposit) → claim_from_note_pool → withdraw_credit
-node scripts/e2e-pool-deposit-test.js
-```
-
-### Schema v2 migration (one-off deploy tooling)
-
-```bash
-# Snapshot current on-chain account sizes (MerkleTree, NotePoolTree, Vault)
-# and write scripts/migration-baseline.json as a known-good pre-migration reference.
-RPC_URL=https://api.devnet.solana.com node scripts/dump-account-sizes.js
-
-# Idempotent runner that reallocates both trees to the new 8912-byte layout
-# (ROOT_HISTORY_SIZE=256). Safe to re-run; no-op once already migrated.
-RPC_URL=https://api.devnet.solana.com node scripts/migrate-schema-v2.js
-```
-
-### Stress and parity
-
-```bash
-# 10 deposits, 10 claims, 5 wallets each side
-node scripts/stress-test.js
-
-# JS ↔ Rust Poseidon parity check
-node scripts/test_poseidon_compat.js
-```
-
----
-
-## Development Workflow
-
-1. **Create a branch** from `main`.
-2. **Make changes** to the relevant module.
-3. **Build** using `cargo build-sbf` (see above).
-4. **Test** against devnet (or localnet for revoke) using the test scripts.
-5. **Open a pull request** with a clear description of what changed and why.
-
-### If you change the program
-
-- Rebuild with `cargo build-sbf`.
-- Deploy to devnet: `solana program deploy target/deploy/darkdrop.so --program-id <KEYPAIR>`.
-- Run all security tests to verify no regressions.
-- If you added, removed, or changed an instruction's accounts or arguments, update the hand-written IDL at `program/idl/darkdrop.json` (see IDL Management below).
-
-### Deploying a FRESH program — deploy + initialize atomicity (security invariant)
-
-**Audit 06 M-03.** `initialize_vault` has no constraint on which signer becomes the vault authority — **the first caller after a fresh deploy wins**, and the winner gains `admin_sweep`, `pause_deposits`, and (after the time-lock) authority-rotation rights. A watcher monitoring `BPFLoaderUpgradeable` program-creation events can race your init. This is a deployment-process invariant, not a code check:
-
-1. **Deploy and initialize as one tightly-sequenced operation**, from the same deployer key, with no human gap between them. Use `--max-len` on a fresh deploy so the program account is sized with headroom for future upgrades (avoids a later "account data too small" redeploy):
-   ```
-   solana program deploy target/deploy/darkdrop.so --program-id <KEYPAIR> --max-len 500000
-   PROGRAM_ID=<deployed id> node scripts/initialize.js
-   ```
-2. `scripts/initialize.js` enforces the invariant on two axes: (a) it refuses to run unless the **program's upgrade authority matches the deployer key** (a front-runner would not hold it); and (b) when the vault is fresh it initializes from the deployer key and **re-reads the account to assert `vault.authority == deployer`**. If the vault already exists with an unexpected authority — or the upgrade authority doesn't match — it **exits non-zero** rather than proceeding. That is the front-run signal.
-3. **If the race is lost** (init front-run before you ran the script): you still hold the program **upgrade authority**, so the deployment is recoverable — `solana program close <PROGRAM_ID>` (or redeploy to a fresh program id) **before any user funds or claim codes rely on it**, then deploy + initialize again atomically. Never build on a deployment whose `vault.authority` is not your deployer key.
-
-This only matters on a *fresh* deploy (devnet redeploy, mainnet bring-up). The long-lived `GSig1…kfAgkU` deployment is already initialized and is not exposed.
-
-### If you change the circuit
-
-- Recompile: `circom circuits/darkdrop.circom --r1cs --wasm --sym -o circuits/build/` (or `circuits/note_pool.circom` for V3).
-- Run trusted setup (phase 2): `snarkjs groth16 setup build/<name>.r1cs build/pot14_final.ptau build/<name>_final.zkey`.
-- Export verification key: `snarkjs zkey export verificationkey build/<name>_final.zkey build/verification_key_<name>.json`.
-- Convert to Rust: `node scripts/export_vk_rust.js circuits/build/verification_key_<name>.json`.
-- Update `program/programs/darkdrop/src/vk.rs` with the new constants for the corresponding VK (`verifying_key_v1` / `verifying_key_v2` / `verifying_key_v3`).
-- Run `scripts/test_poseidon_compat.js` and the relevant E2E script.
-
-### If you change the frontend
-
-- Dev server: `cd frontend && npx next dev`.
-- Build: `npx next build`.
-- Circuit artifacts must be in `frontend/public/circuits/`:
-  - `darkdrop.wasm` (V1/V2 prover, ~2.5 MB)
-  - `darkdrop_final.zkey` (V1 proving key, legacy)
-  - `darkdrop_v2_final.zkey` (V2 proving key, credit note)
-  - `note_pool.wasm` (V3 prover, ~2.5 MB)
-  - `note_pool_final.zkey` (V3 proving key, ~5.8 MB)
-  The V3 artifacts must be present for MAX PRIVACY (pool) deposits to claim — the browser loads them when it detects a pool-flavored claim code.
-
----
-
-## Code Style
-
-- **Rust:** Follow standard Rust conventions. Use `cargo fmt` and `cargo clippy`.
-- **TypeScript/JavaScript:** Use the existing style in `scripts/` and `relayer/`.
-- **Commit messages:** Use imperative mood. Prefix with scope: `program:`, `frontend:`, `circuit:`, `relayer:`, `scripts:`, `docs:`.
-
----
-
-## Security
-
-- **Do not commit private keys, keypairs, or secrets.** The `.gitignore` excludes common patterns, but double-check before committing.
-- **Do not weaken security checks** (remove `require!` statements, relax constraints, etc.) without explicit discussion.
-- **If you find a vulnerability**, see [SECURITY.md](SECURITY.md) for the responsible disclosure process.
-- **A fresh deploy MUST be initialized atomically by the deployer.** `initialize_vault` is first-caller-wins (Audit 06 M-03) — always run `scripts/initialize.js` immediately after `solana program deploy` and confirm it reports the authority as your deployer key. See "Deploying a FRESH program" above.
-
----
-
-## Supported token standards
-
-**Can I use a Token-2022 mint?** **Not yet.** The SPL extension is bound to legacy
-SPL Token only. A Token-2022 mint fails at account validation with a non-obvious
-`AccountOwnedByWrongProgram` error. This is an intentional scope decision (Audit
-06 M-04) driven by the transfer-fee / leaf-commitment hazard — see
-[`ARCHITECTURE.md`](ARCHITECTURE.md) §15 "Token program binding / Token-2022 scope".
-Legacy SPL mints (e.g. Devnet/Mainnet USDC) are fully supported.
-
----
-
-## IDL Management
-
-The IDL is hand-written with deliberately obfuscated field names (privacy feature). Do not auto-generate it with Anchor — the generated output would restore descriptive names like `amount` and `fee` and defeat the obfuscation.
-
-Source of truth: `program/idl/darkdrop.json` (currently **v0.3.0**).
-
-**Current staleness:** The hand-written IDL (v0.3.0) declares **13 instructions**, but the deployed program binary exposes **18**. The 5 instructions present in the binary but missing from the IDL are pre-existing: `create_treasury`, `admin_sweep`, `migrate_vault`, `revoke_drop`, `close_receipt`. The schema v2 and note-pool sessions added `migrate_schema_v2`, `propose_authority_rotation`, `revoke_authority_rotation`, `accept_authority_rotation`, and `create_drop_to_pool` to the IDL. Block explorers and Anchor-based SDK clients still cannot decode calls to the 5 missing instructions; the frontend hardcodes discriminators instead. See KNOWN ISSUES #9 in [ARCHITECTURE.md](ARCHITECTURE.md).
-
-Fixing this is a deploy-time action: add the missing instructions to `program/idl/darkdrop.json` (preserving obfuscated field names) and upload with `anchor idl upgrade`. If you change any existing instruction's accounts or arguments, you must also manually update the hand-written IDL.
-
-```bash
-anchor idl upgrade GSig1QYVwPVhHF6oVEwhadAwdWjTqtq6H5cSMEkfAgkU \
-  --filepath program/idl/darkdrop.json \
-  --provider.cluster devnet \
-  --provider.wallet ~/.config/solana/id.json
-```
-
----
+- Keep every public input documented in the circuit header comment.
+- Name signals for what they are, not for how a particular chain encodes them.
+- Prefer Poseidon for every hash and commitment. Do not introduce a second hash family into the circuits.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the same license as the project.
+By contributing you agree that your contributions will be licensed under the same license as the project, once one is chosen.

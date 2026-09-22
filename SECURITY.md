@@ -1,91 +1,43 @@
 # Security Policy
 
-## Supported Versions
-
-| Version | Cluster | Status |
-|---------|---------|--------|
-| V4 (current) | Devnet | Active development — security reports welcome |
-
----
-
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-If you discover a security vulnerability in DarkDrop, please report it responsibly:
-
-1. **Contact:** Reach the repository maintainer via GitHub private messaging or the contact method listed in the repository profile.
-2. **Include:**
-   - Description of the vulnerability
-   - Steps to reproduce or proof of concept
-   - Affected instruction(s) and file(s)
-   - Suggested severity (Critical / High / Medium / Low)
-   - Suggested fix (if any)
-3. **Response time:** We aim to acknowledge reports within 48 hours and provide a fix timeline within 7 days.
-
----
+Report responsibly to the repository maintainer through GitHub private messaging or the contact method on the repository profile. Include a description, steps to reproduce or a proof of concept, the affected file, a suggested severity, and a suggested fix if you have one. We aim to acknowledge reports within 48 hours and give a fix timeline within 7 days.
 
 ## Scope
 
-The following components are in scope for security reports:
-
-| Component | Location | In Scope |
+| Component | Location | In scope |
 |-----------|----------|----------|
-| Solana program | `program/programs/darkdrop/src/` | Yes |
-| Circom circuits (V2 credit note + V3 note pool) | `circuits/darkdrop.circom`, `circuits/note_pool.circom` | Yes |
-| Relayer server | `relayer/src/` | Yes |
-| Frontend | `frontend/` | Limited (XSS, key exposure) |
-| Scripts | `scripts/` | No (test utilities only) |
+| Credit note claim circuit | `circuits/darkdrop.circom` | Yes |
+| Note pool claim circuit | `circuits/note_pool.circom` | Yes |
+| Merkle membership verifier | `circuits/lib/merkle_tree.circom` | Yes |
+| Circuit test suite | `circuits/test/` | No (test utilities only) |
 
----
+The chain, verifier, and client for Robin Hood Chain are not yet in this repository. Once they land, this table will grow.
 
-## Known Limitations
+## Security properties of the circuits
 
-The following are **known design limitations**, not vulnerabilities. They are documented in the [audit reports](audits/README.md):
+| Property | Mechanism |
+|----------|-----------|
+| No double-claim | Each proof exposes `Poseidon(nullifier)`. The verifier must reject any nullifier hash it has already seen. The circuit binds the hash to the leaf preimage so it cannot be forged. |
+| Leaf privacy | The Merkle proof is a private witness. The public root proves membership without revealing which leaf. |
+| Amount privacy at claim | The amount is a private input. The public `amount_commitment` is `Poseidon(amount, blinding)`, hiding and binding. |
+| Amount integrity | The same amount is constrained into the leaf hash and into the commitment, so the claimed amount is exactly the deposited amount. |
+| Range safety | `Num2Bits(64)` and a non-zero check bound the amount to `1 <= amount < 2^64`. |
+| Recipient binding | The public `recipient` must equal `Poseidon(recipient_hi, recipient_lo)`. The mapping is injective, so a proof cannot be redirected. |
+| Stored commitment unlinkability | The note pool circuit outputs `Poseidon(Poseidon(amount, new_blinding), new_salt)`, a fresh commitment for the same amount that shares nothing with the input leaf. |
 
-1. **Unverified leaf in `create_drop`:** The program cannot verify that the Merkle leaf matches the deposited amount because the leaf commits to private data (secret, nullifier). This is inherent to commitment-scheme mixers (same class as Tornado Cash). A malicious depositor can construct a dishonest leaf, but exploiting it requires other users' deposits to be in the treasury. The Note Pool (V3) layer eliminates this for drops that flow into the pool — both `deposit_to_note_pool` (pool-deposited credit notes) and `create_drop_to_pool` (direct pool entry) construct pool leaves on-chain with a program-verified amount.
+## Known design limitations
 
-2. **Deposit amount is visible:** The `create_drop` instruction uses CPI `system_program::transfer`, which makes the deposit amount visible on-chain. The credit note model hides the amount at claim time and decorrelates at withdraw time, but the deposit itself is public.
+These are properties of the model, not bugs.
 
-3. **Anonymity set grows over time.** Privacy improves as the Merkle tree fills with more deposits. A seeder running on devnet adds 15–30 drops/day; the current leaf count is visible on Solscan for the Merkle Tree PDA.
+1. **The deposit is visible.** Funding a note is a public transfer on whatever chain hosts it. The model hides the claim and decorrelates the withdrawal. It does not hide the deposit.
+2. **Unverified leaf at deposit.** A depositor constructs the leaf from private data, so a verifier cannot check that the leaf's amount matches the funds sent. The note pool layer closes this for notes that pass through it, because the pool leaf is built by the verifier from a verified amount. The base layer inherits the same limitation as every commitment-scheme mixer.
+3. **Anonymity set grows with use.** Privacy at the base layer is bounded by the number of leaves in the tree.
+4. **Password protection is client-side only.** The circuits do not enforce a password. Password-protected claim codes rely entirely on client-side encryption of the code.
 
-4. **Deposit relay trust assumption:** Users who use the private deposit relay trust the relayer to complete the `create_drop` call after receiving SOL. If the relayer crashes, the SOL is in the relayer's wallet with no on-chain recovery mechanism.
+## Audit history
 
-5. **Deposit-side privacy leak on the revoke path:** Creating a `DepositReceipt` at deposit time establishes a permanent on-chain linkage between the depositor wallet, the leaf, and the amount. This is observable from the moment of deposit, regardless of whether revoke is later exercised or the receipt is closed. Users who prioritize claim privacy should use the legacy 5-account `create_drop` call (no receipt, no revoke). See Audit 04 L-04 for the full analysis.
-
-6. **The relayer is an amount-privacy trust party for the withdraw leg.** Amount is hidden **on-chain**, not **from the relayer**. To pre-verify a withdraw before spending gas, the client sends the relayer the credit-note `opening` (`amount || blinding || salt`) in cleartext (`/credit/withdraw`, `/credit-spl/withdraw`). A relayer operator — or anyone with access to a compromised relayer or its logs — therefore learns the exact withdrawn amount and the blinding factor, and can link recipient ↔ amount for relayed withdrawals. This does **not** let the relayer steal funds (the ZK proof / commitment binds the payout to the recipient); the relayer can still only censor. As of issue #22 (I1) the relayer no longer **logs** amounts or any value derived from the opening, which shrinks the exposure window to live request handling, but the trust boundary remains: users who require amount-privacy *from the relayer* should construct and submit the withdraw transaction themselves (the relayer is optional — it only saves the recipient from needing gas). A future option is client-side instruction construction with the relayer co-signing solely as fee payer.
-
----
-
-## Security Audits
-
-All audit reports are available in the [`audits/`](audits/) directory. See [`audits/README.md`](audits/README.md) for the full summary table and fix tracker.
-
-| Audit | Date | Scope | Status |
-|-------|------|-------|--------|
-| [#1 Manual Review](audits/AUDIT-01-MANUAL-REVIEW.md) | 2026-04-06 | Fee system, credit notes, treasury, relay trust | 1 HIGH fixed, 2 MEDIUM accepted, 1 LOW |
-| [#2 Code Review](audits/AUDIT-02-CODE-REVIEW.md) | 2026-04-07 | Full instruction-level review, all modules | 2 HIGH fixed, 4 MEDIUM, 4 LOW, 7 INFO |
-| [#3 Post-Fix Review](audits/AUDIT-03-POST-FIX-REVIEW.md) | 2026-04-08 | Fix verification + `admin_sweep` + full re-audit | 1 HIGH fixed in-cycle (admin_sweep rug-pull), 3 MEDIUM fixed in-cycle, 3 LOW, 4 INFO |
-| [#4 Post-Revoke Review](audits/AUDIT-04-POST-REVOKE.md) | 2026-04-20 | V3 Note Pool + `revoke_drop` + `DepositReceipt` + counter invariants + privacy | 0 CRITICAL, 0 HIGH, 1 MEDIUM fixed in-cycle (orphan receipt), 4 LOW, 4 INFO |
-
-No open HIGH or CRITICAL findings as of Audit 04. DarkDrop has not yet commissioned a third-party firm review — deployment is restricted to Solana devnet.
-
----
-
-## Security Properties
-
-DarkDrop's security model provides the following guarantees:
-
-| Property | Mechanism | Verified |
-|----------|-----------|----------|
-| No double-spend | Nullifier PDAs (Anchor `init` fails if exists); shared namespace across `claim_credit` and `revoke_drop` gives mutual exclusion | Audit #1–#4 |
-| Recipient binding | ZK proof commits to `Poseidon(pubkey_hi, pubkey_lo)` | Audit #2, #3 |
-| Amount integrity | Poseidon commitment verified on-chain at withdrawal | Audit #2, #3 |
-| Stored-commitment unlinkability | Re-randomized with caller-supplied salt: `Poseidon(amount_commitment, salt)` | Audit #3 (M-01-NEW) |
-| Treasury solvency | Balance check minus rent-exempt minimum on every withdrawal | Audit #1–#3 |
-| Obligation-aware admin sweep | Sweep ≤ `treasury − (total_deposited − total_withdrawn) − rent` | Audit #3 (H-01-NEW) |
-| Fee cap | 5% maximum enforced on-chain (500 bps) | Audit #1, #3 |
-| Proof soundness | Groth16 verification via `groth16-solana` crate (V1/V2/V3 circuits) | Audit #2, #4 |
-| Revoke authorization | Preimage-verified leaf reconstruction; 30-day time-lock; depositor-signed; shares nullifier namespace with claim | Audit #4 |
-| Extended root history | 256-slot circular buffer (schema v2) — claim-code snapshots verify on-chain for ~1–2 weeks of devnet activity before rotating out | Schema v2 migration (2026-04-23) |
-| Authority rotation | Propose/revoke/accept sidecar PDA keyed by vault; single-proposal-in-flight invariant; new authority must sign acceptance | Audit #4 L-03 fix |
+The Solana implementation of this model went through seven audit rounds. Those reports cover the Solana program and are kept with that code, not here. The circuit-level findings they contain have been applied to the circuits in this repository: injective recipient binding replaced the earlier squared-recipient check, and the vacuous in-circuit password gate was removed.
