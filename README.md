@@ -21,6 +21,10 @@ Two layers build on that core:
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full model, the commitment scheme, and the properties each circuit enforces.
 
+## The private transfer protocol
+
+[SPEC.md](SPEC.md) is the design for private transfers on Robin Hood Chain, built on the credit note model. A transfer is an offer: the sender proves they gave up value and writes an obligation addressed to the recipient. The recipient claims it into their wallet with a proof, at a time of their choosing. An unclaimed offer can be reclaimed by the sender after it expires. Value leaves through settlements paid in epoch batches. No proof ever moves value. The spec is a draft under review.
+
 ## Repository layout
 
 | Path | Contents |
@@ -30,12 +34,13 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full model, the commitment scheme
 | `circuits/lib/merkle_tree.circom` | Poseidon Merkle membership verifier, depth parameterized. |
 | `circuits/test/` | Proof generation and verification test suite for the claim circuit. |
 | `ARCHITECTURE.md` | The credit note model, chain-agnostic. |
+| `SPEC.md` | Private transfer protocol for Robin Hood Chain, draft. |
 | `SECURITY.md` | Reporting policy and the security properties the circuits guarantee. |
 | `CONTRIBUTING.md` | Building and testing the circuits locally. |
 
 ## Status
 
-The circuits are carried over unchanged in logic from the audited Solana build. The chain, verifier, and client for Robin Hood Chain are being designed on top of them and will be added to this repository as they take shape.
+The circuits are carried over unchanged in logic from the audited Solana build. The private transfer protocol is specified in SPEC.md and under design review. Circuits, a reference verifier, and a client for it will follow the order given at the end of that document.
 
 ## Build
 
