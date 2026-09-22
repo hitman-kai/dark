@@ -1,0 +1,145 @@
+use anchor_lang::prelude::*;
+use crate::state::*;
+use crate::errors::DarkDropError;
+use crate::verifier::verify_proof_v2;
+use crate::poseidon::{poseidon_hash, pubkey_to_field};
+
+/// Claim a drop as a credit note: verify ZK proof, store commitment, mark nullifier spent.
+///
+/// ZERO SOL moves in this instruction. The amount is a private input in the ZK proof
+/// (not visible in instruction data or events). Only the Poseidon commitment is stored.
+///
+/// The `inputs` parameter is an opaque byte vector containing:
+///   [0..32]  merkle_root
+///   [32..64] commitment (Poseidon(amount, blinding_factor))
+/// (issue #20: the former [64..96] password_hash was removed — 96 -> 64 bytes.)
+///
+/// No field is named "amount", "fee", or "lamports" in the IDL.
+pub fn handle_claim_credit(
+    ctx: Context<ClaimCredit>,
+    nullifier_hash: [u8; 32],
+    proof: ProofData,
+    inputs: Vec<u8>,
+    salt: [u8; 32],
+) -> Result<()> {
+    // Parse opaque inputs (issue #20: password_hash removed, 96 -> 64 bytes)
+    require!(inputs.len() == 64, DarkDropError::InvalidInputLength);
+
+    let merkle_root: [u8; 32] = inputs[0..32].try_into().unwrap();
+    let amount_commitment: [u8; 32] = inputs[32..64].try_into().unwrap();
+
+    // Validate merkle root
+    let tree = ctx.accounts.merkle_tree.load()?;
+    require!(
+        tree.is_known_root(&merkle_root),
+        DarkDropError::InvalidRoot
+    );
+    drop(tree);
+
+    // Compute recipient field element: Poseidon(pubkey_hi_128, pubkey_lo_128)
+    let recipient_hash = pubkey_to_field(&ctx.accounts.recipient.key());
+
+    // Build public inputs — 4 elements, NO amount
+    // Order matches circuit signal declaration order:
+    //   [0] merkle_root       (signal input merkle_root)
+    //   [1] nullifier_hash    (signal input nullifier_hash)
+    //   [2] recipient         (signal input recipient)
+    //   [3] amount_commitment (signal input amount_commitment)
+    // (issue #20: the [4] password_hash input was removed — vacuous in-circuit gate.)
+    let public_inputs: [[u8; 32]; 4] = [
+        merkle_root,
+        nullifier_hash,
+        recipient_hash,
+        amount_commitment,
+    ];
+
+    // Verify Groth16 proof (v2 circuit — 4 public inputs)
+    verify_proof_v2(&proof, &public_inputs)?;
+
+    // Initialize CreditNote PDA with re-randomized commitment.
+    // stored_commitment = Poseidon(original_commitment, salt)
+    // This prevents deposit→claim linkage via on-chain account data (M-01-NEW fix).
+    let stored_commitment = poseidon_hash(&amount_commitment, &salt);
+
+    let credit = &mut ctx.accounts.credit_note;
+    credit.bump = ctx.bumps.credit_note;
+    credit.recipient = ctx.accounts.recipient.key();
+    credit.commitment = stored_commitment;
+    credit.nullifier_hash = nullifier_hash;
+    credit.salt = salt;
+    credit.created_at = Clock::get()?.unix_timestamp;
+
+    // Store nullifier (double-claim prevention)
+    ctx.accounts.nullifier_account.nullifier_hash = nullifier_hash;
+
+    // Update vault stats
+    let vault = &mut ctx.accounts.vault;
+    vault.total_claims = vault.total_claims
+        .checked_add(1)
+        .ok_or(DarkDropError::Overflow)?;
+
+    emit!(CreditCreated {
+        nullifier_hash,
+        recipient: ctx.accounts.recipient.key(),
+        timestamp: credit.created_at,
+    });
+
+    // NO SOL TRANSFER — NO AMOUNT IN INSTRUCTION DATA OR EVENTS
+    // Commitment deliberately omitted from event to prevent deposit→claim linkage.
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+#[instruction(nullifier_hash: [u8; 32])]
+pub struct ClaimCredit<'info> {
+    #[account(
+        mut,
+        seeds = [b"vault"],
+        bump = vault.bump,
+    )]
+    pub vault: Account<'info, Vault>,
+
+    #[account(
+        seeds = [b"merkle_tree", vault.key().as_ref()],
+        bump,
+    )]
+    pub merkle_tree: AccountLoader<'info, MerkleTreeAccount>,
+
+    /// CreditNote PDA — stores committed amount for later withdrawal
+    #[account(
+        init,
+        payer = payer,
+        space = CreditNote::SIZE,
+        seeds = [b"credit", nullifier_hash.as_ref()],
+        bump,
+    )]
+    pub credit_note: Account<'info, CreditNote>,
+
+    /// Nullifier PDA — double-claim prevention
+    #[account(
+        init,
+        payer = payer,
+        space = NullifierAccount::SIZE,
+        seeds = [b"nullifier", nullifier_hash.as_ref()],
+        bump,
+    )]
+    pub nullifier_account: Account<'info, NullifierAccount>,
+
+    /// CHECK: Recipient — any account, NOT a signer.
+    /// Bound by the ZK proof via Poseidon(pubkey).
+    pub recipient: UncheckedAccount<'info>,
+
+    /// Fee payer (relayer in gasless mode, claimer in direct mode)
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[event]
+pub struct CreditCreated {
+    pub nullifier_hash: [u8; 32],
+    pub recipient: Pubkey,
+    pub timestamp: i64,
+}

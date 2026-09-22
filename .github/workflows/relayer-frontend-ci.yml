@@ -1,0 +1,42 @@
+name: Relayer + Frontend CI
+
+# Issue #22 / I2: enforce the circomlibjs <-> on-chain light-hasher Poseidon
+# parity vector in CI for BOTH packages, using each package's lockfile-resolved
+# circomlibjs (so a version drift — #21 — is caught here, not in production).
+
+on:
+  pull_request:
+    paths:
+      - 'relayer/**'
+      - 'frontend/**'
+      - 'scripts/poseidon-parity-test.js'
+      - '.github/workflows/relayer-frontend-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'relayer/**'
+      - 'frontend/**'
+      - 'scripts/poseidon-parity-test.js'
+
+jobs:
+  poseidon-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: [relayer, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Lockfile-enforced install (ties to #21): resolves the exact circomlibjs
+      # this package would ship with.
+      - name: Install (${{ matrix.pkg }})
+        run: npm ci --prefix ${{ matrix.pkg }}
+
+      - name: Poseidon parity vector (${{ matrix.pkg }} circomlibjs vs on-chain)
+        run: NODE_PATH=${{ matrix.pkg }}/node_modules node scripts/poseidon-parity-test.js

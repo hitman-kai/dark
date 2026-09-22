@@ -1,0 +1,76 @@
+# Dependencies
+node_modules/
+package-lock.json
+# Exception: pin ceremony script deps for reproducibility (see PR #15)
+!scripts/package-lock.json
+# Exception (F4 #21): pin relayer + frontend deps for reproducible installs —
+# proof pre-verification (snarkjs/circomlibjs) + tx signing (@solana/web3.js).
+!relayer/package-lock.json
+!frontend/package-lock.json
+
+# Build artifacts
+target/
+.next/
+out/
+dist/
+
+# Circuit build artifacts (large binary files)
+circuits/build/*.zkey
+circuits/build/*.ptau
+circuits/build/*.r1cs
+circuits/build/*.sym
+circuits/build/*.wtns
+circuits/build/darkdrop_js/
+circuits/build/minimal_test_js/
+circuits/build/proof.json
+circuits/build/public.json
+# Keep verification keys (small, needed for reference)
+!circuits/build/verification_key.json
+!circuits/build/verification_key_v2.json
+
+# Solana test ledger
+test-ledger/
+app/test-ledger/
+program/test-ledger/
+
+# Keypairs and secrets
+*.keypair.json
+*-keypair.json
+.env
+.env.*
+!**/.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Notes (kept locally, not in repo)
+notes/
+
+# Study / reference repos
+_study/
+
+# Legacy app/ directory (stale Node.js copy of frontend libs, not maintained)
+/app/
+
+# Frontend circuit artifacts (large binaries, download separately)
+
+# Generated frontend files
+frontend/public/file.svg
+frontend/public/globe.svg
+frontend/public/next.svg
+frontend/public/vercel.svg
+frontend/public/window.svg
+frontend/README.md
+.claude/
+CLAUDE.md
+AGENTS.md
+circuits/build/note_pool/note_pool_0000.zkey
+circuits/build/note_pool/note_pool.r1cs
+circuits/build/note_pool/note_pool.sym
